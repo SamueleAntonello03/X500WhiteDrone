@@ -1,0 +1,125 @@
+attività svolte:
+
+10/8/25
+installato ubuntu core sul raspberry, inserito la connessione wifi per la configurazione(richiesta),creato account ubuntu, inserito la key sull'account,rebootato ubuntu
+ottenuto l'indirizzo ip, collegato il raspberry tramite ssh al computer in modo da poter dare comandi bash direttamente dal computer,
+
+- comando usato per connessione ssh al raspberry sul drone(white) : ssh -i chiavi_ssh.txt dronesmact3@192.168.0.80
+
+- chiavi_ssh.txt è un file contenente la chiave privata della connessione ssh, la chiave pubblica è stata caricata sul mio account ubuntu.
+
+12/8/2025
+
+sudo snap install classic --devmode --edge, questo comando serve ad abilitare classic-snap
+sudo snap install python38, comando che serve a installare python 3.8
+
+dronesmact3@localhost:~$ sudo ip link set end0 up
+sudo ip addr add 192.168.144.10/24 dev end0
+dronesmact3@localhost:~$ ip a show end0
+2: end0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether e4:5f:01:f1:98:fd brd ff:ff:ff:ff:ff:ff
+    inet 192.168.144.10/24 scope global end0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::e65f:1ff:fef1:98fd/64 scope link 
+       valid_lft forever preferred_lft forever
+dronesmact3@localhost:~$ ping 192.168.144.25
+PING 192.168.144.25 (192.168.144.25) 56(84) bytes of data.
+64 bytes from 192.168.144.25: icmp_seq=1 ttl=64 time=5.14 ms
+64 bytes from 192.168.144.25: icmp_seq=2 ttl=64 time=2.62 ms
+64 bytes from 192.168.144.25: icmp_seq=3 ttl=64 time=0.179 ms
+64 bytes from 192.168.144.25: icmp_seq=4 ttl=64 time=0.178 ms
+64 bytes from 192.168.144.25: icmp_seq=5 ttl=64 time=0.164 ms
+64 bytes from 192.168.144.25: icmp_seq=6 ttl=64 time=0.194 ms
+64 bytes from 192.168.144.25: icmp_seq=7 ttl=64 time=0.196 ms
+64 bytes from 192.168.144.25: icmp_seq=8 ttl=64 time=0.175 ms
+^C
+--- 192.168.144.25 ping statistics ---
+8 packets transmitted, 8 received, 0% packet loss, time 7139ms
+rtt min/avg/max/mdev = 0.164/1.106/5.143/1.722 ms
+dronesmact3@localhost:~$ ip neigh show dev end0
+192.168.144.25 lladdr 7c:e1:be:c9:42:27 REACHABLE 
+
+abbiamo fatto questi comandi in modo da rendere possibile la comunicazione ethernet tra raspberry e la telecamera.
+
+ssh -i chiavi_ssh.txt -L 8554:192.168.144.25:8554 dronesmact3@192.168.0.80
+
+20/6/2025
+installata la libreria curl con il comando snap install curl
+
+24/6/2025 -> abbiamo cambiato sistema operativo del raspberry da ubuntucore a ubuntuserver, login: nome account= ubuntu, psw = ubuntu3
+account ubunutu: antonellosamuele.03@gmail.com 	psw=@SAMUbubu1516, indirizzo ip del raspberry: 192.168.0.81
+accesso al drone mediante nome utente dronesmact3 psw = ubuntu ->
+
+dronesmact3@ubuntu:~$ ffmpeg -i rtsp://192.168.144.25:8554/main.264 -f mpegts udp://192.168.1.124:5000 con questa riga di comando avvio la trasmissione udp del flusso video
+
+26/6/25:
+scaricato su raspberry powertop per visualizzare i consumi del raspberry, tuttavia powertop è limitato su sistemi embedded linux, infatti misura il numero di wakeups al secondo ovvero il numero di eventi che svegliano la CPU e quindi influenzando il consumo e vedere quali processi o hardware sono attivi.
+
+con il comando sudo powertop --auto-tune vengono applicate automaticamente tutte le ottimizzazioni energetiche possibili per il contesto kernel/hardware a nostra disposizione.
+
+le ottimizzazioni effettuate da auto-tune NON PERSISTONO AL RIAVVIO, quindi devono essere riapplicate ogni volta
+
+avviando powertop e andando alla sezione "tunables", tutte le voci marcate "good" indicano una modalità di risparmio energetico abilitato.
+
+Il bluetooth è una funzione che sul nostro drone non serve quindi la disabilitiamo, così risparmiamo anche dei wakeup inutili sulla cpu -> meno consumo energetico.
+
+per disabilitare il bluetooth -> sudo apt install rfkill -> sudo rfkill block bluetooth
+
+anche questa modifica dura fino al riavvio del raspberry, successivamente deve essere rifatta.
+
+applichiamo  sul raspberry un governor ondemand che vuol dire che la cpu quando non serve opera a frequenze minime mentre quando è richiesto uno "sforzo" come ad esempio lo streaming udp , le prestazioni della cpu tornano a regime.
+
+per farlo installo "cpufrequtils" per effettuare queste modifiche sulle 4 cpu di cui è munito il raspberry
+
+dronesmact3@ubuntu:~$ sudo systemctl enable cpufrequtils
+cpufrequtils.service is not a native service, redirecting to systemd-sysv-install.
+Executing: /usr/lib/systemd/systemd-sysv-install enable cpufrequtils
+dronesmact3@ubuntu:~$ sudo system restart cpufrequtils
+sudo: system: command not found
+dronesmact3@ubuntu:~$ sudo systemctl restart cpufrequtils
+dronesmact3@ubuntu:~$ for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+  echo "$cpu: $(cat $cpu/cpufreq/scaling_governor)"
+done
+/sys/devices/system/cpu/cpu0: ondemand
+/sys/devices/system/cpu/cpu1: ondemand
+/sys/devices/system/cpu/cpu2: ondemand
+/sys/devices/system/cpu/cpu3: ondemand
+
+ora le cpu del rasp sono sul preset di prestazioni ondemand.
+
+FLUSSO VIDEO LAGGOSO E VERDE
+SUL RASPBERRY:dronesmact3@ubuntu:~$ gst-launch-1.0 rtspsrc location=rtsp://192.168.144.25:8554/main.264 ! application/x-rtp,media=video,encoding-name=H265 ! rtph265depay ! h265parse ! rtph265pay config-interval=1 pt=96 ! udpsink host=192.168.0.124 port=5000
+
+SUL COMPUTER:samueleantonello@pop-os:~$ gst-launch-1.0 udpsrc port=5000 ! application/x-rtp,payload=96 ! rtph265depay ! h265parse ! avdec_h265 ! videoconvert ! autovideosink
+----------------------------------------------------------------------------------------------------------
+
+30/6/2025
+
+parte pc pipe gstream -> uso il decodificatore hardware del mio computer invece che il decodificatore software:
+
+gst-launch-1.0 rtspsrc location=rtsp://192.168.144.25:8554/main.264 latency=0 ! rtph265depay ! h265parse ! vaapih265dec ! videoconvert ! autovideosink sync=false
+
+Per far arrivare lo stream alla ground station, il Raspberry deve fare da bridge o relay tra la rete della telecamera e la rete della ground station.
+
+Comandi che funzionano (in teoria):
+lato rasp:
+
+gst-launch-1.0 rtspsrc location=rtsp://192.168.144.25:8554/main.264 latency=0 ! \
+rtph265depay ! h265parse ! rtph265pay config-interval=1 pt=96 ! \
+udpsink host=192.168.0.124 port=5000
+
+
+lato pc:
+gst-launch-1.0 udpsrc port=5000 caps="application/x-rtp, media=video, encoding-name=H265, payload=96" ! \
+rtph265depay ! h265parse ! vaapih265dec ! videoconvert ! autovideosink sync=false
+
+nel nostro caso non possiamo fare uno streaming rtsp diretto dato che la groundstation non è "vede" la telecamera nella sua rete.
+
+fondamentale -> inizia prima lo streaming da parte del raspberry e poi la ricezione sul pc
+
+
+
+
+
+
+
