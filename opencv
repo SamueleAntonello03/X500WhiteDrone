@@ -1,0 +1,22 @@
+import cv2
+
+udp_url = "udp://@:5600"  # ascolta sulla porta 5600
+
+cap = cv2.VideoCapture(udp_url)
+
+if not cap.isOpened():
+    print("Errore: Impossibile aprire lo stream UDP")
+    exit()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Errore: frame non ricevuto")
+        break
+
+    cv2.imshow("Video UDP da Raspberry", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
