@@ -1,0 +1,23 @@
+import cv2
+
+# Se stai usando broadcast o multicast, usa solo la porta con '@' per ascoltare tutte le interfacce
+udp_url = "udp://@:5600"
+
+cap = cv2.VideoCapture(udp_url)
+
+if not cap.isOpened():
+    print("Errore: non riesco ad aprire lo stream UDP")
+    exit()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Errore: frame non ricevuto")
+        break
+
+    cv2.imshow("Video da Raspberry UDP", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
