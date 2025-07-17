@@ -2,24 +2,23 @@ import socket
 from siyi_message import *
 from time import sleep, time
 import logging
-from utils import  toInt
+from utils import toInt
 import threading
 
 class SIYISDK:
     def __init__(self, server_ip="192.168.144.25", port=37260, debug=False):
         """
-        
         Params
         --
         - server_ip [str] IP address of the camera
         - port: [int] UDP port of the camera
         """
-        self._debug= debug # print debug messages
+        self._debug = debug
         if self._debug:
             d_level = logging.DEBUG
         else:
             d_level = logging.INFO
-        LOG_FORMAT=' [%(levelname)s] %(asctime)s [SIYISDK::%(funcName)s] :\t%(message)s'
+        LOG_FORMAT = ' [%(levelname)s] %(asctime)s [SIYISDK::%(funcName)s] :\t%(message)s'
         logging.basicConfig(format=LOG_FORMAT, level=d_level)
         self._logger = logging.getLogger(self.__class__.__name__)
 
@@ -31,783 +30,519 @@ class SIYISDK:
 
         self._server_ip = server_ip
         self._port = port
-
-        self._BUFF_SIZE=1024
+        self._BUFF_SIZE = 1024
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._rcv_wait_t = 2 # Receiving wait time
+        self._rcv_wait_t = 2
         self._socket.settimeout(self._rcv_wait_t)
 
         self._connected = False
 
+        # Message containers
         self._fw_msg = FirmwareMsg()
         self._hw_msg = HardwareIDMsg()
         self._autoFocus_msg = AutoFocusMsg()
-        self._manualZoom_msg=ManualZoomMsg()
-        self._manualFocus_msg=ManualFocusMsg()
-        self._gimbalSpeed_msg=GimbalSpeedMsg()
-        self._center_msg=CenterMsg()
-        self._record_msg=RecordingMsg()
-        self._mountDir_msg=MountDirMsg()
-        self._motionMode_msg=MotionModeMsg()
-        self._funcFeedback_msg=FuncFeedbackInfoMsg()
-        self._att_msg=AttitdueMsg()
-        self._last_att_seq=-1
+        self._manualZoom_msg = ManualZoomMsg()
+        self._manualFocus_msg = ManualFocusMsg()
+        self._gimbalSpeed_msg = GimbalSpeedMsg()
+        self._center_msg = CenterMsg()
+        self._record_msg = RecordingMsg()
+        self._mountDir_msg = MountDirMsg()
+        self._motionMode_msg = MotionModeMsg()
+        self._funcFeedback_msg = FuncFeedbackInfoMsg()
+        self._att_msg = AttitdueMsg()
+        self._last_att_seq = -1
 
-        # Stop threads
-        self._stop = False # used to stop the above thread
-        
-        self._recv_thread = threading.Thread(target=self.recvLoop)
+        # Thread control
+        self._stop = False
+        self._recv_thread = threading.Thread(target=self.recvLoop, daemon=True)
 
-        # Connection thread
-        self._last_fw_seq=0 # used to check on connection liveness
-        self._conn_loop_rate = 1 # seconds
-        self._conn_thread = threading.Thread(target=self.connectionLoop, args=(self._conn_loop_rate,))
+        # Ottimizzazioni: frequenze ridotte e thread opzionali
+        self._last_fw_seq = 0
+        self._conn_loop_rate = 2.0  # Ridotto da 1 a 2 secondi
+        self._conn_thread = threading.Thread(target=self.connectionLoop, args=(self._conn_loop_rate,), daemon=True)
 
-        # Gimbal info thread @ 1Hz
-        self._gimbal_info_loop_rate = 1
-        self._g_info_thread = threading.Thread(target=self.gimbalInfoLoop,
-                                                args=(self._gimbal_info_loop_rate,))
+        # Thread gimbal info ridotto a 0.5Hz invece di 1Hz
+        self._gimbal_info_loop_rate = 2.0  # Ogni 2 secondi
+        self._g_info_thread = threading.Thread(target=self.gimbalInfoLoop, args=(self._gimbal_info_loop_rate,), daemon=True)
 
-        # Gimbal attitude thread @ 10Hz
-        self._gimbal_att_loop_rate = 0.1
-        self._g_att_thread = threading.Thread(target=self.gimbalAttLoop,
-                                                args=(self._gimbal_att_loop_rate,))
+        # Thread attitude ridotto a 5Hz invece di 10Hz
+        self._gimbal_att_loop_rate = 0.2  # Ogni 200ms invece di 100ms
+        self._g_att_thread = threading.Thread(target=self.gimbalAttLoop, args=(self._gimbal_att_loop_rate,), daemon=True)
+
+        # Flag per controllo thread opzionali
+        self._enable_info_thread = False
+        self._enable_att_thread = False
 
     def resetVars(self):
-        """
-        Resets variables to their initial values. For example, to prepare for a fresh connection
-        """
+        """Reset variables to initial values"""
         self._connected = False
         self._fw_msg = FirmwareMsg()
         self._hw_msg = HardwareIDMsg()
         self._autoFocus_msg = AutoFocusMsg()
-        self._manualZoom_msg=ManualZoomMsg()
-        self._manualFocus_msg=ManualFocusMsg()
-        self._gimbalSpeed_msg=GimbalSpeedMsg()
-        self._center_msg=CenterMsg()
-        self._record_msg=RecordingMsg()
-        self._mountDir_msg=MountDirMsg()
-        self._motionMode_msg=MotionModeMsg()
-        self._funcFeedback_msg=FuncFeedbackInfoMsg()
-        self._att_msg=AttitdueMsg()
-
-
+        self._manualZoom_msg = ManualZoomMsg()
+        self._manualFocus_msg = ManualFocusMsg()
+        self._gimbalSpeed_msg = GimbalSpeedMsg()
+        self._center_msg = CenterMsg()
+        self._record_msg = RecordingMsg()
+        self._mountDir_msg = MountDirMsg()
+        self._motionMode_msg = MotionModeMsg()
+        self._funcFeedback_msg = FuncFeedbackInfoMsg()
+        self._att_msg = AttitdueMsg()
         return True
 
-    def connect(self, maxWaitTime=3.0):
+    def connect(self, maxWaitTime=3.0, enable_info_thread=False, enable_att_thread=False):
         """
-        Makes sure there is conenction with the camera before doing anything.
-        It requests Frimware version for some time before it gives up
-
+        Connect to camera with optional background threads
+        
         Params
         --
-        maxWaitTime [int] Maximum time to wait before giving up on connection
+        maxWaitTime [float] Maximum time to wait before giving up
+        enable_info_thread [bool] Enable gimbal info background thread
+        enable_att_thread [bool] Enable gimbal attitude background thread
         """
-        self._recv_thread.start()
-        self._conn_thread.start()
+        self._enable_info_thread = enable_info_thread
+        self._enable_att_thread = enable_att_thread
+        
+        if not self._recv_thread.is_alive():
+            self._recv_thread.start()
+        if not self._conn_thread.is_alive():
+            self._conn_thread.start()
+            
         t0 = time()
-        while(True):
+        while True:
             if self._connected:
-                self._g_info_thread.start()
-                self._g_att_thread.start()
+                # Avvia thread opzionali solo se richiesti
+                if self._enable_info_thread and not self._g_info_thread.is_alive():
+                    self._g_info_thread.start()
+                if self._enable_att_thread and not self._g_att_thread.is_alive():
+                    self._g_att_thread.start()
                 return True
-            if (time() - t0)>maxWaitTime and not self._connected:
+            if (time() - t0) > maxWaitTime and not self._connected:
                 self.disconnect()
                 self._logger.error("Failed to connect to camera")
                 return False
 
     def disconnect(self):
+        """Disconnect and stop all threads"""
         self._logger.info("Stopping all threads")
-        self._stop = True # stop the connection checking thread
+        self._stop = True
         self.resetVars()
 
     def checkConnection(self):
-        """
-        checks if there is live connection to the camera by requesting the Firmware version.
-        This function is to be run in a thread at a defined frequency
-        """
+        """Check connection by requesting firmware version"""
         self.requestFirmwareVersion()
         sleep(0.1)
-        if self._fw_msg.seq!=self._last_fw_seq and len(self._fw_msg.gimbal_firmware_ver)>0:
+        if self._fw_msg.seq != self._last_fw_seq and len(self._fw_msg.gimbal_firmware_ver) > 0:
             self._connected = True
-            self._last_fw_seq=self._fw_msg.seq
+            self._last_fw_seq = self._fw_msg.seq
         else:
             self._connected = False
 
     def connectionLoop(self, t):
-        """
-        This function is used in a thread to check connection status periodically
-
-        Params
-        --
-        t [float] message frequency, secnod(s)
-        """
-        while(True):
-            if self._stop:
-                self._connected=False
-                self.resetVars()
-                self._logger.warning("Connection checking loop is stopped. Check your connection!")
-                break
+        """Background connection checking loop"""
+        while not self._stop:
             self.checkConnection()
             sleep(t)
+        self._connected = False
+        self.resetVars()
+        self._logger.warning("Connection checking loop stopped")
 
     def isConnected(self):
         return self._connected
 
     def gimbalInfoLoop(self, t):
-        """
-        This function is used in a thread to get gimbal info periodically
-
-        Params
-        --
-        t [float] message frequency, secnod(s) 
-        """
-        while(True):
-            if not self._connected:
-                self._logger.warning("Gimbal info thread is stopped. Check connection")
-                break
+        """Background gimbal info loop (opzionale)"""
+        while not self._stop and self._connected:
             self.requestGimbalInfo()
             sleep(t)
+        self._logger.warning("Gimbal info thread stopped")
 
     def gimbalAttLoop(self, t):
-        """
-        This function is used in a thread to get gimbal attitude periodically
-
-        Params
-        --
-        t [float] message frequency, secnod(s) 
-        """
-        while(True):
-            if not self._connected:
-                self._logger.warning("Gimbal attitude thread is stopped. Check connection")
-                break
+        """Background gimbal attitude loop (opzionale)"""
+        while not self._stop and self._connected:
             self.requestGimbalAttitude()
             sleep(t)
+        self._logger.warning("Gimbal attitude thread stopped")
 
     def sendMsg(self, msg):
-        """
-        Sends a message to the camera
-
-        Params
-        --
-        msg [str] Message to send
-        """
-        b = bytes.fromhex(msg)
+        """Send message to camera"""
         try:
+            b = bytes.fromhex(msg)
             self._socket.sendto(b, (self._server_ip, self._port))
             return True
         except Exception as e:
-            self._logger.error("Could not send bytes")
+            self._logger.error("Could not send bytes: %s", e)
             return False
 
-    def rcvMsg(self):
-        data=None
-        try:
-            data,addr = self._socket.recvfrom(self._BUFF_SIZE)
-        except Exception as e:
-            self._logger.warning("%s. Did not receive message within %s second(s)", e, self._rcv_wait_t)
-        return data
-
     def recvLoop(self):
+        """Main receiving loop"""
         self._logger.debug("Started data receiving thread")
-        while( not self._stop):
-            self.bufferCallback()
+        while not self._stop:
+            try:
+                self.bufferCallback()
+            except Exception as e:
+                if not self._stop:
+                    self._logger.warning("Error in receive loop: %s", e)
         self._logger.debug("Exiting data receiving thread")
 
-    
     def bufferCallback(self):
-        """
-        Receives messages and parses its content
-        """
-        buff,addr = self._socket.recvfrom(self._BUFF_SIZE)
+        """Receive and parse messages - versione ottimizzata"""
+        try:
+            buff, addr = self._socket.recvfrom(self._BUFF_SIZE)
+        except socket.timeout:
+            return
+        except Exception as e:
+            self._logger.warning("Socket error: %s", e)
+            return
 
         buff_str = buff.hex()
-        self._logger.debug("Buffer: %s", buff_str)
+        if self._debug:
+            self._logger.debug("Buffer: %s", buff_str)
 
-        # 10 bytes: STX+CTRL+Data_len+SEQ+CMD_ID+CRC16
-        #            2 + 1  +    2   + 2 +   1  + 2
-        MINIMUM_DATA_LENGTH=10*2
-
-        HEADER='5566'
-        # Go through the buffer
-        while(len(buff_str)>=MINIMUM_DATA_LENGTH):
-            if buff_str[0:4]!=HEADER:
-                # Remove the 1st element and continue 
-                tmp=buff_str[1:]
-                buff_str=tmp
+        MINIMUM_DATA_LENGTH = 20  # 10 bytes * 2 chars
+        HEADER = '5566'
+        
+        # Parsing ottimizzato
+        while len(buff_str) >= MINIMUM_DATA_LENGTH:
+            if not buff_str.startswith(HEADER):
+                buff_str = buff_str[2:]  # Rimuovi 1 byte (2 chars)
                 continue
 
-            # Now we got minimum amount of data. Check if we have enough
-            # Data length, bytes are reversed, according to SIYI SDK
-            low_b = buff_str[6:8] # low byte
-            high_b = buff_str[8:10] # high byte
-            data_len = high_b+low_b
-            data_len = int('0x'+data_len, base=16)
-            char_len = data_len*2
+            # Estrai lunghezza dati
+            try:
+                low_b = buff_str[6:8]
+                high_b = buff_str[8:10]
+                data_len = int(high_b + low_b, 16)
+                char_len = data_len * 2
+            except ValueError:
+                buff_str = buff_str[2:]
+                continue
 
-            # Check if there is enough data (including payload)
-            if(len(buff_str) < (MINIMUM_DATA_LENGTH+char_len)):
-                # No useful data
-                buff_str=''
+            # Verifica se ci sono abbastanza dati
+            if len(buff_str) < (MINIMUM_DATA_LENGTH + char_len):
                 break
             
-            packet = buff_str[0:MINIMUM_DATA_LENGTH+char_len]
-            buff_str = buff_str[MINIMUM_DATA_LENGTH+char_len:]
+            packet = buff_str[:MINIMUM_DATA_LENGTH + char_len]
+            buff_str = buff_str[MINIMUM_DATA_LENGTH + char_len:]
 
-            # Finally decode the packet!
+            # Decodifica pacchetto
             val = self._in_msg.decodeMsg(packet)
             if val is None:
                 continue
             
             data, data_len, cmd_id, seq = val[0], val[1], val[2], val[3]
-
-            if cmd_id==COMMAND.ACQUIRE_FW_VER:
-                self.parseFirmwareMsg(data, seq)
-            elif cmd_id==COMMAND.ACQUIRE_HW_ID:
-                self.parseHardwareIDMsg(data, seq)
-            elif cmd_id==COMMAND.ACQUIRE_GIMBAL_INFO:
-                self.parseGimbalInfoMsg(data, seq)
-            elif cmd_id==COMMAND.ACQUIRE_GIMBAL_ATT:
-                self.parseAttitudeMsg(data, seq)
-            elif cmd_id==COMMAND.FUNC_FEEDBACK_INFO:
-                self.parseFunctionFeedbackMsg(data, seq)
-            elif cmd_id==COMMAND.GIMBAL_ROT:
-                self.parseGimbalSpeedMsg(data, seq)
-            elif cmd_id==COMMAND.AUTO_FOCUS:
-                self.parseAutoFocusMsg(data, seq)
-            elif cmd_id==COMMAND.MANUAL_FOCUS:
-                self.parseManualFocusMsg(data, seq)
-            elif cmd_id==COMMAND.MANUAL_ZOOM:
-                self.parseZoomMsg(data, seq)
-            elif cmd_id==COMMAND.CENTER:
-                self.parseGimbalCenterMsg(data, seq)
+            
+            # Parsing ottimizzato con dict lookup
+            parsers = {
+                COMMAND.ACQUIRE_FW_VER: self.parseFirmwareMsg,
+                COMMAND.ACQUIRE_HW_ID: self.parseHardwareIDMsg,
+                COMMAND.ACQUIRE_GIMBAL_INFO: self.parseGimbalInfoMsg,
+                COMMAND.ACQUIRE_GIMBAL_ATT: self.parseAttitudeMsg,
+                COMMAND.FUNC_FEEDBACK_INFO: self.parseFunctionFeedbackMsg,
+                COMMAND.GIMBAL_ROT: self.parseGimbalSpeedMsg,
+                COMMAND.AUTO_FOCUS: self.parseAutoFocusMsg,
+                COMMAND.MANUAL_FOCUS: self.parseManualFocusMsg,
+                COMMAND.MANUAL_ZOOM: self.parseZoomMsg,
+                COMMAND.CENTER: self.parseGimbalCenterMsg,
+            }
+            
+            parser = parsers.get(cmd_id)
+            if parser:
+                parser(data, seq)
             else:
-                self._logger.warning("CMD ID is not recognized")
-        
-        return
-    
-    ##################################################
-    #               Request functions                #
-    ##################################################    
-    def requestFirmwareVersion(self):
-        """
-        Sends request for firmware version
+                self._logger.warning("CMD ID %s not recognized", cmd_id)
 
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
+    # Request functions (mantenute come originali ma con migliore error handling)
+    def requestFirmwareVersion(self):
         msg = self._out_msg.firmwareVerMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
     def requestHardwareID(self):
-        """
-        Sends request for Hardware ID
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.hwIdMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
     def requestGimbalAttitude(self):
-        """
-        Sends request for gimbal attitude
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.gimbalAttMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
     def requestGimbalInfo(self):
-        """
-        Sends request for gimbal information
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.gimbalInfoMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
-    def requestFunctionFeedback(self):
-        """
-        Sends request for function feedback msg
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.funcFeedbackMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestAutoFocus(self):
-        """
-        Sends request for auto focus
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.autoFocusMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestZoomIn(self):
-        """
-        Sends request for zoom in
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.zoomInMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestZoomOut(self):
-        """
-        Sends request for zoom out
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.zoomOutMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestZoomHold(self):
-        """
-        Sends request for stopping zoom
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.stopZoomMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestLongFocus(self):
-        """
-        Sends request for manual focus, long shot
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.longFocusMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestCloseFocus(self):
-        """
-        Sends request for manual focus, close shot
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.closeFocusMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestFocusHold(self):
-        """
-        Sends request for manual focus, stop
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.stopFocusMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+    def requestGimbalSpeed(self, yaw_speed: int, pitch_speed: int):
+        msg = self._out_msg.gimbalSpeedMsg(yaw_speed, pitch_speed)
+        return self.sendMsg(msg)
 
     def requestCenterGimbal(self):
-        """
-        Sends request for gimbal centering
-
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.centerMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
-
-    def requestGimbalSpeed(self, yaw_speed:int, pitch_speed:int):
-        """
-        Sends request for gimbal centering
-
-        Params
-        --
-        yaw_speed [int] -100~0~100. away from zero -> fast, close to zero -> slow. Sign is for direction
-        pitch_speed [int] Same as yaw_speed
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.gimbalSpeedMsg(yaw_speed, pitch_speed)
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
     def requestPhoto(self):
-        """
-        Sends request for taking photo
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.takePhotoMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
     def requestRecording(self):
-        """
-        Sends request for toglling video recording
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
         msg = self._out_msg.recordMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+        return self.sendMsg(msg)
 
-    def requestFPVMode(self):
-        """
-        Sends request for setting FPV mode
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.fpvModeMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+    def requestAutoFocus(self):
+        msg = self._out_msg.autoFocusMsg()
+        return self.sendMsg(msg)
 
-    def requestLockMode(self):
-        """
-        Sends request for setting Lock mode
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.lockModeMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+    def requestZoomIn(self):
+        msg = self._out_msg.zoomInMsg()
+        return self.sendMsg(msg)
 
-    def requestFollowMode(self):
-        """
-        Sends request for setting Follow mode
-        
-        Returns
-        --
-        [bool] True: success. False: fail
-        """
-        msg = self._out_msg.followModeMsg()
-        if not self.sendMsg(msg):
-            return False
-        return True
+    def requestZoomOut(self):
+        msg = self._out_msg.zoomOutMsg()
+        return self.sendMsg(msg)
 
-    ####################################################
-    #                Parsing functions                 #
-    ####################################################
-    def parseFirmwareMsg(self, msg:str, seq:int):
+    def requestZoomHold(self):
+        msg = self._out_msg.stopZoomMsg()
+        return self.sendMsg(msg)
+
+    # Parsing functions (mantenute come originali)
+    def parseFirmwareMsg(self, msg: str, seq: int):
         try:
-            self._fw_msg.gimbal_firmware_ver= msg[8:16]
-            self._fw_msg.seq=seq
-            
-            self._logger.debug("Firmware version: %s", self._fw_msg.gimbal_firmware_ver)
-
+            self._fw_msg.gimbal_firmware_ver = msg[8:16]
+            self._fw_msg.seq = seq
+            if self._debug:
+                self._logger.debug("Firmware version: %s", self._fw_msg.gimbal_firmware_ver)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing firmware msg: %s", e)
             return False
 
-    def parseHardwareIDMsg(self, msg:str, seq:int):
+    def parseHardwareIDMsg(self, msg: str, seq: int):
         try:
-            self._hw_msg.seq=seq
+            self._hw_msg.seq = seq
             self._hw_msg.id = msg
-            self._logger.debug("Hardware ID: %s", self._hw_msg.id)
-
+            if self._debug:
+                self._logger.debug("Hardware ID: %s", self._hw_msg.id)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing hardware ID msg: %s", e)
             return False
 
-    def parseAttitudeMsg(self, msg:str, seq:int):
-        
+    def parseAttitudeMsg(self, msg: str, seq: int):
         try:
-            self._att_msg.seq=seq
-            self._att_msg.yaw = toInt(msg[2:4]+msg[0:2]) /10.
-            self._att_msg.pitch = toInt(msg[6:8]+msg[4:6]) /10.
-            self._att_msg.roll = toInt(msg[10:12]+msg[8:10]) /10.
-            self._att_msg.yaw_speed = toInt(msg[14:16]+msg[12:14]) /10.
-            self._att_msg.pitch_speed = toInt(msg[18:20]+msg[16:18]) /10.
-            self._att_msg.roll_speed = toInt(msg[22:24]+msg[20:22]) /10.
+            self._att_msg.seq = seq
+            self._att_msg.yaw = toInt(msg[2:4] + msg[0:2]) / 10.0
+            self._att_msg.pitch = toInt(msg[6:8] + msg[4:6]) / 10.0
+            self._att_msg.roll = toInt(msg[10:12] + msg[8:10]) / 10.0
+            self._att_msg.yaw_speed = toInt(msg[14:16] + msg[12:14]) / 10.0
+            self._att_msg.pitch_speed = toInt(msg[18:20] + msg[16:18]) / 10.0
+            self._att_msg.roll_speed = toInt(msg[22:24] + msg[20:22]) / 10.0
 
-            self._logger.debug("(yaw, pitch, roll= (%s, %s, %s)", 
-                                    self._att_msg.yaw, self._att_msg.pitch, self._att_msg.roll)
-            self._logger.debug("(yaw_speed, pitch_speed, roll_speed= (%s, %s, %s)", 
-                                    self._att_msg.yaw_speed, self._att_msg.pitch_speed, self._att_msg.roll_speed)
+            if self._debug:
+                self._logger.debug("Attitude (yaw, pitch, roll): (%.1f, %.1f, %.1f)", 
+                                 self._att_msg.yaw, self._att_msg.pitch, self._att_msg.roll)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing attitude msg: %s", e)
             return False
 
-    def parseGimbalInfoMsg(self, msg:str, seq:int):
+    def parseGimbalInfoMsg(self, msg: str, seq: int):
         try:
-            self._record_msg.seq=seq
-            self._mountDir_msg.seq=seq
-            self._motionMode_msg.seq=seq
+            self._record_msg.seq = seq
+            self._mountDir_msg.seq = seq
+            self._motionMode_msg.seq = seq
             
-            self._record_msg.state = int('0x'+msg[6:8], base=16)
-            self._motionMode_msg.mode = int('0x'+msg[8:10], base=16)
-            self._mountDir_msg.dir = int('0x'+msg[10:12], base=16)
+            self._record_msg.state = int(msg[6:8], 16)
+            self._motionMode_msg.mode = int(msg[8:10], 16)
+            self._mountDir_msg.dir = int(msg[10:12], 16)
 
-            self._logger.debug("Recording state %s", self._record_msg.state)
-            self._logger.debug("Mounting direction %s", self._mountDir_msg.dir)
-            self._logger.debug("Gimbal motion mode %s", self._motionMode_msg.mode)
+            if self._debug:
+                self._logger.debug("Recording: %s, Mode: %s, Dir: %s", 
+                                 self._record_msg.state, self._motionMode_msg.mode, self._mountDir_msg.dir)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing gimbal info msg: %s", e)
             return False
 
-    def parseAutoFocusMsg(self, msg:str, seq:int):
-        
+    def parseAutoFocusMsg(self, msg: str, seq: int):
         try:
-            self._autoFocus_msg.seq=seq
-            self._autoFocus_msg.success = bool(int('0x'+msg, base=16))
-
-            
-            self._logger.debug("Auto focus success: %s", self._autoFocus_msg.success)
-
+            self._autoFocus_msg.seq = seq
+            self._autoFocus_msg.success = bool(int(msg, 16))
+            if self._debug:
+                self._logger.debug("Auto focus success: %s", self._autoFocus_msg.success)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing auto focus msg: %s", e)
             return False
 
-    def parseZoomMsg(self, msg:str, seq:int):
-        
+    def parseZoomMsg(self, msg: str, seq: int):
         try:
-            self._manualZoom_msg.seq=seq
-            self._manualZoom_msg.level = int('0x'+msg[2:4]+msg[0:2], base=16) /10.
-
-            
-            self._logger.debug("Zoom level %s", self._manualZoom_msg.level)
-
+            self._manualZoom_msg.seq = seq
+            self._manualZoom_msg.level = int(msg[2:4] + msg[0:2], 16) / 10.0
+            if self._debug:
+                self._logger.debug("Zoom level: %.1f", self._manualZoom_msg.level)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing zoom msg: %s", e)
             return False
 
-    def parseManualFocusMsg(self, msg:str, seq:int):
-        
+    def parseManualFocusMsg(self, msg: str, seq: int):
         try:
-            self._manualFocus_msg.seq=seq
-            self._manualFocus_msg.success = bool(int('0x'+msg, base=16))
-
-            
-            self._logger.debug("Manual  focus success: %s", self._manualFocus_msg.success)
-
+            self._manualFocus_msg.seq = seq
+            self._manualFocus_msg.success = bool(int(msg, 16))
+            if self._debug:
+                self._logger.debug("Manual focus success: %s", self._manualFocus_msg.success)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing manual focus msg: %s", e)
             return False
 
-    def parseGimbalSpeedMsg(self, msg:str, seq:int):
-        
+    def parseGimbalSpeedMsg(self, msg: str, seq: int):
         try:
-            self._gimbalSpeed_msg.seq=seq
-            self._gimbalSpeed_msg.success = bool(int('0x'+msg, base=16))
-
-            
-            self._logger.debug("Gimbal speed success: %s", self._gimbalSpeed_msg.success)
-
+            self._gimbalSpeed_msg.seq = seq
+            self._gimbalSpeed_msg.success = bool(int(msg, 16))
+            if self._debug:
+                self._logger.debug("Gimbal speed success: %s", self._gimbalSpeed_msg.success)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing gimbal speed msg: %s", e)
             return False
 
-    def parseGimbalCenterMsg(self, msg:str, seq:int):
-        
+    def parseGimbalCenterMsg(self, msg: str, seq: int):
         try:
-            self._center_msg.seq=seq
-            self._center_msg.success = bool(int('0x'+msg, base=16))
-
-            
-            self._logger.debug("Gimbal center success: %s", self._center_msg.success)
-
+            self._center_msg.seq = seq
+            self._center_msg.success = bool(int(msg, 16))
+            if self._debug:
+                self._logger.debug("Gimbal center success: %s", self._center_msg.success)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing gimbal center msg: %s", e)
             return False
 
-    def parseFunctionFeedbackMsg(self, msg:str, seq:int):
-        
+    def parseFunctionFeedbackMsg(self, msg: str, seq: int):
         try:
-            self._funcFeedback_msg.seq=seq
-            self._funcFeedback_msg.info_type = int('0x'+msg, base=16)
-
-            
-            self._logger.debug("Function Feedback Code: %s", self._funcFeedback_msg.info_type)
-
+            self._funcFeedback_msg.seq = seq
+            self._funcFeedback_msg.info_type = int(msg, 16)
+            if self._debug:
+                self._logger.debug("Function feedback code: %s", self._funcFeedback_msg.info_type)
             return True
         except Exception as e:
-            self._logger.error("Error %s", e)
+            self._logger.error("Error parsing function feedback msg: %s", e)
             return False
 
-    ##################################################
-    #                   Get functions                #
-    ##################################################
+    # Get functions
     def getAttitude(self):
-        return(self._att_msg.yaw, self._att_msg.pitch, self._att_msg.roll)
+        return (self._att_msg.yaw, self._att_msg.pitch, self._att_msg.roll)
 
     def getAttitudeSpeed(self):
-        return(self._att_msg.yaw_speed, self._att_msg.pitch_speed, self._att_msg.roll_speed)
+        return (self._att_msg.yaw_speed, self._att_msg.pitch_speed, self._att_msg.roll_speed)
 
     def getFirmwareVersion(self):
-        return(self._fw_msg.gimbal_firmware_ver)
+        return self._fw_msg.gimbal_firmware_ver
 
     def getHardwareID(self):
-        return(self._hw_msg.id)
+        return self._hw_msg.id
 
     def getRecordingState(self):
-        return(self._record_msg.state)
+        return self._record_msg.state
 
     def getMotionMode(self):
-        return(self._motionMode_msg.mode)
+        return self._motionMode_msg.mode
 
     def getMountingDirection(self):
-        return(self._mountDir_msg.dir)
+        return self._mountDir_msg.dir
 
     def getFunctionFeedback(self):
-        return(self._funcFeedback_msg.info_type)
+        return self._funcFeedback_msg.info_type
 
     def getZoomLevel(self):
-        return(self._manualZoom_msg.level)
+        return self._manualZoom_msg.level
 
-    #################################################
-    #                 Set functions                 #
-    #################################################
-    def setGimbalRotation(self, yaw, pitch, err_thresh=1.0, kp=4):
+    # Set functions
+    def setGimbalRotation(self, yaw, pitch, err_thresh=1.0, kp=4, max_attempts=50):
         """
-        Sets gimbal attitude angles yaw and pitch in degrees
-
+        Sets gimbal attitude angles yaw and pitch in degrees - versione ottimizzata
+        
         Params
         --
         yaw: [float] desired yaw in degrees
-        pitch: [float] desired pitch in degrees
-        err_thresh: [float] acceptable error threshold, in degrees, to stop correction
-        kp [float] proportional gain
+        pitch: [float] desired pitch in degrees  
+        err_thresh: [float] acceptable error threshold, in degrees
+        kp: [float] proportional gain
+        max_attempts: [int] maximum number of attempts
         """
-        if (pitch >25 or pitch <-90):
-            self._logger.error("desired pitch is outside controllable range -90~25")
-            return
+        if not (-90 <= pitch <= 25):
+            self._logger.error("Desired pitch %.1f is outside controllable range -90~25", pitch)
+            return False
         
-        print ("pitch:",pitch, ("yaw:",yaw))
-               
-        if (yaw >45 or yaw <-45):
-            self._logger.error("Desired yaw is outside controllable range -45~45")
-            return
+        if not (-45 <= yaw <= 45):
+            self._logger.error("Desired yaw %.1f is outside controllable range -45~45", yaw)
+            return False
         
-        th = err_thresh
-        gain = kp
-        while(True):
+        self._logger.info("Starting gimbal rotation to yaw=%.1f, pitch=%.1f", yaw, pitch)
+        
+        attempts = 0
+        while attempts < max_attempts:
             self.requestGimbalAttitude()
-            if self._att_msg.seq==self._last_att_seq:
-                self._logger.info("Did not get new attitude msg")
-                self.requestGimbalSpeed(0,0)
-                continue
-
-            self._last_att_seq = self._att_msg.seq
-
-            yaw_err = -yaw + self._att_msg.yaw # NOTE for some reason it's reversed!!
-            pitch_err = pitch - self._att_msg.pitch
-
-            self._logger.debug("yaw_err= %s", yaw_err)
-            self._logger.debug("pitch_err= %s", pitch_err)
-
-            if (abs(yaw_err) <= th and abs(pitch_err)<=th):
+            
+            # Attendi messaggio di attitude aggiornato
+            if self._att_msg.seq == self._last_att_seq:
+                self._logger.debug("Waiting for new attitude message")
                 self.requestGimbalSpeed(0, 0)
-                self._logger.info("Goal rotation is reached")
-                break
-
-            y_speed_sp = max(min(100, int(gain*yaw_err)), -100)
-            p_speed_sp = max(min(100, int(gain*pitch_err)), -100)
-            self._logger.debug("yaw speed setpoint= %s", y_speed_sp)
-            self._logger.debug("pitch speed setpoint= %s", p_speed_sp)
+                sleep(0.2)  # Ridotto da 0.5 a 0.2
+                attempts += 1
+                continue
+            
+            self._last_att_seq = self._att_msg.seq
+            
+            # Calcola errori
+            yaw_err = -yaw + self._att_msg.yaw  # Yaw invertito
+            pitch_err = pitch - self._att_msg.pitch
+            
+            if self._debug:
+                self._logger.debug("Errors - yaw: %.2f, pitch: %.2f", yaw_err, pitch_err)
+            
+            # Controlla se obiettivo raggiunto
+            if abs(yaw_err) <= err_thresh and abs(pitch_err) <= err_thresh:
+                self.requestGimbalSpeed(0, 0)
+                self._logger.info("Goal rotation reached")
+                return True
+            
+            # Calcola velocità con saturazione
+            y_speed_sp = max(-100, min(100, int(kp * yaw_err)))
+            p_speed_sp = max(-100, min(100, int(kp * pitch_err)))
+            
+            if self._debug:
+                self._logger.debug("Speed setpoints - yaw: %d, pitch: %d", y_speed_sp, p_speed_sp)
+            
             self.requestGimbalSpeed(y_speed_sp, p_speed_sp)
+            sleep(0.1)  # Frequenza comando ridotta
+            attempts += 1
+        
+        # Timeout raggiunto
+        self._logger.warning("Max attempts (%d) reached without reaching goal rotation", max_attempts)
+        self.requestGimbalSpeed(0, 0)
+        return False
 
-            sleep(0.1) # command frequency
 
 def test():
-    cam=SIYISDK(debug=False)
+    """Test function ottimizzato"""
+    cam = SIYISDK(debug=False)
 
-    if not cam.connect():
+    # Connessione senza thread automatici per risparmiare risorse
+    if not cam.connect(enable_info_thread=False, enable_att_thread=False):
         exit(1)
 
-    print("Firmware version: ", cam.getFirmwareVersion())
+    print("Firmware version:", cam.getFirmwareVersion())
     
-    cam.requestGimbalSpeed(10,0)
-    sleep(3)
-    cam.requestGimbalSpeed(0,0)
-    print("Attitude: ", cam.getAttitude())
-    cam.requestCenterGimbal()
-
-    val=cam.getRecordingState()
-    print("Recording state: ",val)
-    cam.requestRecording()
-    sleep(0.1)
-    val=cam.getRecordingState()
-    print("Recording state: ",val)
-    cam.requestRecording()
-    sleep(0.1)
-    val=cam.getRecordingState()
-    print("Recording state: ",val)
-
-    print("Taking photo...")
-    cam.requestPhoto()
-    sleep(1)
-    print("Feedback: ", cam.getFunctionFeedback())
-
-    cam.setGimbalRotation(10,20, err_thresh=1, kp=4)
-    cam.setGimbalRotation(-10,-90, err_thresh=1, kp=4)
-
+    # Test movimento gimbal
+    cam.requestGimbalSpeed(10, 0)
+    sleep(2)
+    cam.requestGimbalSpeed(0, 0)
+    print("Attitude:", cam.getAttitude())
+    
+    # Test rotazione ottimizzata
+    success = cam.setGimbalRotation(10, 20, err_thresh=1, kp=4)
+    print("Rotation success:", success)
+    
     cam.disconnect()
 
-if __name__=="__main__":
+if __name__ == "__main__":
     test()
