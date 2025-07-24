@@ -27,7 +27,7 @@ class GimbalController:
             msg = self.master.recv_match(type='RC_CHANNELS', blocking=True, timeout=1)
             if msg:
                 rc_yaw = msg.chan12_raw
-                rc_pitch = msg.chan13_raw
+                rc_pitch = msg.chan10_raw
 
                 if not (900 < rc_yaw < 2100 and 900 < rc_pitch < 2100):
                     continue
