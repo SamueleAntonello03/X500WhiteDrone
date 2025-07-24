@@ -10,13 +10,27 @@ except ImportError:
 class GimbalController:
     def __init__(self, connection="/dev/ttyAMA0", baud=57600, cam_ip="192.168.144.25", cam_port=37260):
         self.master = mavutil.mavlink_connection(connection, baud=baud)
+        
+        # Attendi il primo heartbeat
+        self.master.wait_heartbeat()
+        print("Heartbeat ricevuto.")
+        
+        # Richiedi lo stream RC_CHANNELS a 5Hz
+        self.master.mav.request_data_stream_send(
+            self.master.target_system,
+            self.master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+            5,  # Hz (aumenta se vuoi maggiore frequenza)
+            1   # start = true
+        )
+
         self.cam = SIYISDK(server_ip=cam_ip, port=cam_port)
         if not self.cam.connect():
             print("Errore: impossibile connettersi alla telecamera")
             exit(1)
+
         self.prev_yaw = None
         self.prev_pitch = None
-
     def map_rc(self, rc_value, rc_min, rc_max, out_min, out_max):
         rc_value = max(rc_min, min(rc_max, rc_value))
         return ((rc_value - rc_min) / (rc_max - rc_min)) * (out_max - out_min) + out_min
