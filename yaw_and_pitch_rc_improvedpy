@@ -10,21 +10,16 @@ except ImportError:
 class GimbalController:
     def __init__(self, connection="/dev/ttyAMA0", baud=57600, cam_ip="192.168.144.25", cam_port=37260):
         self.master = mavutil.mavlink_connection(connection, baud=baud)
-        
-        # Attendi il primo heartbeat
         self.master.wait_heartbeat()
         print("✅ Heartbeat ricevuto.")
 
-        # Richiedi RC_CHANNELS a 10Hz (più reattivo)
         self.master.mav.request_data_stream_send(
             self.master.target_system,
             self.master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
-            10,  # Frequenza aumentata
-            1    # start
+            10, 1
         )
 
-        # Connessione alla telecamera
         self.cam = SIYISDK(server_ip=cam_ip, port=cam_port)
         if not self.cam.connect():
             print("Errore: impossibile connettersi alla telecamera")
@@ -38,12 +33,14 @@ class GimbalController:
         return ((rc_value - rc_min) / (rc_max - rc_min)) * (out_max - out_min) + out_min
 
     def run(self):
-        print("🎮 Controllo YAW & PITCH da RC (CH12 = YAW, CH13 = PITCH)...")
+        print("🎮 Controllo YAW & PITCH da RC (CH12 = YAW, CH10 = PITCH)...")
         while True:
             msg = self.master.recv_match(type='RC_CHANNELS', blocking=True, timeout=1)
             if msg:
                 rc_yaw = msg.chan12_raw
-                rc_pitch = msg.chan13_raw
+                rc_pitch = msg.chan10_raw  # ← canale corretto
+
+                print(f"CH12 (YAW): {rc_yaw}, CH10 (PITCH): {rc_pitch}")  # Debug
 
                 if not (900 < rc_yaw < 2100 and 900 < rc_pitch < 2100):
                     continue
@@ -51,7 +48,6 @@ class GimbalController:
                 yaw = self.map_rc(rc_yaw, 1000, 2000, -120, 120)
                 pitch = self.map_rc(rc_pitch, 1000, 2000, -90, 25)
 
-                # Invia solo se cambia di almeno 0.3° (più sensibile)
                 if (self.prev_yaw is None or abs(yaw - self.prev_yaw) > 0.3 or
                     self.prev_pitch is None or abs(pitch - self.prev_pitch) > 0.3):
 
@@ -60,8 +56,9 @@ class GimbalController:
                     self.prev_yaw = yaw
                     self.prev_pitch = pitch
 
-            time.sleep(0.005)  # Reattività molto alta
+            time.sleep(0.005)
 
 if __name__ == "__main__":
     controller = GimbalController()
     controller.run()
+
