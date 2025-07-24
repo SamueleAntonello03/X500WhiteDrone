@@ -1,4 +1,3 @@
-import time
 from pymavlink import mavutil
 
 try:
@@ -17,48 +16,45 @@ class GimbalController:
             self.master.target_system,
             self.master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
-            10, 1
+            10,  # 10 Hz per massima reattività
+            1
         )
 
         self.cam = SIYISDK(server_ip=cam_ip, port=cam_port)
         if not self.cam.connect():
-            print("Errore: impossibile connettersi alla telecamera")
+            print("Errore: connessione camera fallita.")
             exit(1)
 
         self.prev_yaw = None
         self.prev_pitch = None
 
-    def map_rc(self, rc_value, rc_min, rc_max, out_min, out_max):
-        rc_value = max(rc_min, min(rc_max, rc_value))
-        return ((rc_value - rc_min) / (rc_max - rc_min)) * (out_max - out_min) + out_min
+    def map_rc(self, value, rc_min, rc_max, out_min, out_max):
+        """Map RC value to angle"""
+        value = max(rc_min, min(rc_max, value))
+        return ((value - rc_min) / (rc_max - rc_min)) * (out_max - out_min) + out_min
 
     def run(self):
-        print("🎮 Controllo YAW & PITCH da RC (CH12 = YAW, CH10 = PITCH)...")
+        print("🎮 Controllo YAW (CH12) + PITCH (CH10) attivo...")
         while True:
-            msg = self.master.recv_match(type='RC_CHANNELS', blocking=True, timeout=1)
-            if msg:
-                rc_yaw = msg.chan12_raw
-                rc_pitch = msg.chan10_raw  # ← canale corretto
+            msg = self.master.recv_match(type='RC_CHANNELS', blocking=True, timeout=0.2)
+            if not msg:
+                continue
 
-                print(f"CH12 (YAW): {rc_yaw}, CH10 (PITCH): {rc_pitch}")  # Debug
+            rc_yaw = msg.chan12_raw
+            rc_pitch = msg.chan10_raw
 
-                if not (900 < rc_yaw < 2100 and 900 < rc_pitch < 2100):
-                    continue
+            if not (900 < rc_yaw < 2100 and 900 < rc_pitch < 2100):
+                continue
 
-                yaw = self.map_rc(rc_yaw, 1000, 2000, -120, 120)
-                pitch = self.map_rc(rc_pitch, 1000, 2000, -90, 25)
+            yaw = self.map_rc(rc_yaw, 1000, 2000, -120, 120)
+            pitch = self.map_rc(rc_pitch, 1000, 2000, -90, 25)
 
-                if (self.prev_yaw is None or abs(yaw - self.prev_yaw) > 0.3 or
-                    self.prev_pitch is None or abs(pitch - self.prev_pitch) > 0.3):
+            # Riduci soglia a 0.3 per più step → più fluido
+            if (self.prev_yaw is None or abs(yaw - self.prev_yaw) >= 0.3 or
+                self.prev_pitch is None or abs(pitch - self.prev_pitch) >= 0.3):
 
-                    self.cam.setGimbalRotation(yaw, pitch)
-                    print(f"YAW: {yaw:.1f}° | PITCH: {pitch:.1f}°")
-                    self.prev_yaw = yaw
-                    self.prev_pitch = pitch
-
-            time.sleep(0.005)
-
-if __name__ == "__main__":
-    controller = GimbalController()
-    controller.run()
+                self.cam.setGimbalRotation(yaw, pitch)
+                print(f"YAW: {yaw:.1f}° | PITCH: {pitch:.1f}°")
+                self.prev_yaw = yaw
+                self.prev_pitch = pitch
 
