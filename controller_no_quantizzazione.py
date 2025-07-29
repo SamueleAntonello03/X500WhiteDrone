@@ -8,7 +8,7 @@ except ImportError:
     print("Errore: impossibile importare siyi_sdk.")
     exit(1)
 
-class QuantizedGimbalController:
+class GimbalController:
     def __init__(self, connection="/dev/ttyAMA0", baud=57600, cam_ip="192.168.144.25", cam_port=37260):
         self.master = mavutil.mavlink_connection(connection, baud=baud)
         self.master.wait_heartbeat()
@@ -39,10 +39,6 @@ class QuantizedGimbalController:
         self.current_lock = threading.Lock()
         self.target_updated = threading.Event()
 
-        # Quantizzazione rimossa per precisione massima
-        # self.yaw_step = 5.0
-        # self.pitch_step = 5.0
-
         self.yaw_scale = 240 / 1000
         self.yaw_offset = -120 - (1000 * self.yaw_scale)
         self.pitch_scale = 115 / 1000
@@ -55,10 +51,7 @@ class QuantizedGimbalController:
     def map_rc_fast(self, rc_value, scale, offset):
         return rc_value * scale + offset
 
-    # Quantizzazione rimossa per precisione continua
-    # def quantize_angle(self, angle, step):
-    #     return round(angle / step) * step
-
+   
     # THREAD 1: Lettura RC Zoom (CH8 e CH11)
     def zoom_rc_reader_thread(self):
         print("🎮 Thread Zoom RC Reader avviato...")
@@ -134,7 +127,6 @@ class QuantizedGimbalController:
                         # Se il lock è occupato, salta questo update - il pilota non aspetta mai
                         
             except:
-                # 🚀 RECOVERY ULTRA-VELOCE: 0.1ms
                 time.sleep(0.0001)
 
     # 🚁 THREAD 4 OTTIMIZZATO: Gimbal Executor con Resilienza
@@ -222,5 +214,6 @@ class QuantizedGimbalController:
             print("✅ Controller fermato.")
 
 if __name__ == "__main__":
-    controller = QuantizedGimbalController()
+    controller = GimbalController()
     controller.run()
+
