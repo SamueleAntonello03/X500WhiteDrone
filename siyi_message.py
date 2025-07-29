@@ -448,15 +448,15 @@ class SIYIMESSAGE:
         - yaw_speed [int] in degrees
         - pitch_speed [int] in degrees
         """
-        if yaw_speed>100:
-            yaw_speed=100
-        if yaw_speed<-100:
-            yaw_speed=-100
+        if yaw_speed>120:
+            yaw_speed=120
+        if yaw_speed<-120:
+            yaw_speed=-120
 
-        if pitch_speed>100:
-            pitch_speed=100
-        if pitch_speed<-100:
-            pitch_speed=-100
+        if pitch_speed>120:
+            pitch_speed=120
+        if pitch_speed<-120:
+            pitch_speed=-120
 
         data1=toHex(yaw_speed, 8)
         data2=toHex(pitch_speed, 8)
